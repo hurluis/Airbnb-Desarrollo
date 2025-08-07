@@ -31,6 +31,7 @@ class RegisterRequest(BaseModel):
     name: str
     email: str
     password: str
+    is_admin: bool = False
 
 class FeedbackRequest(BaseModel):
     id_booking: int
@@ -48,6 +49,12 @@ class ReservationRequest(BaseModel):
     in_time: str
     out_time: str
 
+
+class PropertyStatusRequest(BaseModel):
+    property_id: int
+    admin_id: int
+    is_active: bool
+
 @app.get("/")
 def home():
     return FileResponse("paginas/page.html")
@@ -62,7 +69,8 @@ async def register(user: RegisterRequest):
         new_user = {
             "name": user.name,
             "email": user.email,
-            "password": user.password
+            "password": user.password,
+            "is_admin": user.is_admin
         }
         response = supabase.table("Users").insert(new_user).execute()
         if response.status_code != 201:
@@ -80,6 +88,33 @@ async def login(user: LoginRequest):
         if not result.data:
             return JSONResponse(content={"message": "Correo o contraseña incorrectos"}, status_code=400)
         return JSONResponse(content={"message": "Inicio de sesión exitoso", "user_id": result.data[0]['id']}, status_code=200)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/property/status")
+async def update_property_status(request: PropertyStatusRequest):
+    try:
+        admin = (
+            supabase.table("Users")
+            .select("is_admin")
+            .eq("id", request.admin_id)
+            .execute()
+        )
+        if not admin.data or not admin.data[0].get("is_admin"):
+            return JSONResponse(content={"message": "No autorizado"}, status_code=403)
+
+        response = (
+            supabase.table("Property")
+            .update({"is_active": request.is_active})
+            .eq("id", request.property_id)
+            .execute()
+        )
+        if not response.data:
+            return JSONResponse(content={"message": "Propiedad no encontrada"}, status_code=404)
+
+        status_msg = "activada" if request.is_active else "inactivada"
+        return JSONResponse(content={"message": f"Propiedad {status_msg} con éxito"}, status_code=200)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -108,6 +143,15 @@ async def reserve(reservation: ReservationRequest):
         user = supabase.table("Users").select("*").eq("id", reservation.user_id).execute()
         if not user.data:
             return JSONResponse(content={"message": "Usuario no encontrado"}, status_code=404)
+
+        property_info = (
+            supabase.table("Property")
+            .select("is_active")
+            .eq("id", reservation.property_id)
+            .execute()
+        )
+        if not property_info.data or not property_info.data[0].get("is_active"):
+            return JSONResponse(content={"message": "La propiedad no está disponible"}, status_code=400)
 
         try:
             in_time = datetime.strptime(reservation.in_time, "%Y-%m-%d")

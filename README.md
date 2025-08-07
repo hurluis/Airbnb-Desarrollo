@@ -23,6 +23,7 @@ Este proyecto es una plataforma web tipo Airbnb desarrollada con **HTML**, **CSS
 - 📆 **Reservas Inteligentes**: Guarda y bloquea fechas ya reservadas.
 - 💬 **Retroalimentación**: Usuarios pueden dejar comentarios útiles sobre los alojamientos y calificaciones.
 - 🔐 **Gestión de Reservas**: Visualización desde “Mis reservas”.
+- 🛡️ **Modo Administrador**: Usuarios con rol de administrador pueden activar o desactivar propiedades disponibles.
 - ☁️ **Base de Datos en la Nube**: Usando Supabase para guardar usuarios, reservas y feedbacks.
 - 🔄 **Actualización Asíncrona**: Background tasks y respuestas rápidas vía FastAPI.
 
