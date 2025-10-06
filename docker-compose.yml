@@ -1,0 +1,39 @@
+services:
+  backend:
+    image: hurluis/migration-backend:1.0
+    container_name: fastapi-backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://user_fastapi:mysecretpassword@db:5432/booking_app_db
+    volumes:
+      - ./frontend:/app/frontend:ro     
+    depends_on:
+      - db
+
+  frontend:
+    image: hurluis/migration-frontend:1.0
+    container_name: nginx-frontend
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+  db:
+    image: postgres:15
+    container_name: local-postgres-db
+    restart: always
+    environment:
+      POSTGRES_USER: user_fastapi
+      POSTGRES_PASSWORD: mysecretpassword
+      POSTGRES_DB: booking_app_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
+    name: booking-postgres-data

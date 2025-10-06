@@ -1,19 +1,35 @@
 # python -m uvicorn main:app --reload
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi import BackgroundTasks
-from supabase import create_client, Client
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+from pathlib import Path
+import os
+
+# Nuevas importaciones para PostgreSQL
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 
 load_dotenv()
 app = FastAPI()
-app.mount("/estilos", StaticFiles(directory="estilos"), name="estilos")
-app.mount("/paginas", StaticFiles(directory="paginas"), name="paginas")
+
+BASE_DIR = Path(__file__).resolve().parent
+FRONTEND_DIR = BASE_DIR / "frontend"
+
+app.mount(
+    "/estilos",
+    StaticFiles(directory=str(FRONTEND_DIR / "estilos")),
+    name="estilos",
+)
+app.mount(
+    "/frontend",
+    StaticFiles(directory=str(FRONTEND_DIR)),
+    name="frontend",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,19 +39,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SUPABASE_URL = "https://otaedzxedjzadltjtvzu.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im90YWVkenhlZGp6YWRsdGp0dnp1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzkwNTA1NDUsImV4cCI6MjA1NDYyNjU0NX0.mPZLDBWtfzcq-rEatzAlzWGrwggABZlmLP4EyL1VfZ4"
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Configuración de la conexión a la base de datos local
+DATABASE_URL = os.getenv("DATABASE_URL")
+engine = create_engine(DATABASE_URL)
 
+# --- Modelos Pydantic (sin cambios) ---
 class RegisterRequest(BaseModel):
     name: str
     email: str
     password: str
 
 class FeedbackRequest(BaseModel):
-    id_booking: int
     id_property: int
-    comments: str
+    comment: str
     rating: int
     
 class LoginRequest(BaseModel):
@@ -48,142 +64,122 @@ class ReservationRequest(BaseModel):
     in_time: str
     out_time: str
 
+# --- Funciones de ayuda para la base de datos ---
+def execute_query(query, params=None):
+    with engine.connect() as connection:
+        try:
+            result = connection.execute(text(query), params or {})
+            connection.commit() # Importante para INSERT, UPDATE, DELETE
+            return result
+        except SQLAlchemyError as e:
+            print(f"Error en la base de datos: {e}")
+            raise HTTPException(status_code=500, detail="Error en la base de datos")
+
+# --- Endpoints ---
+
 @app.get("/")
 def home():
-    return FileResponse("paginas/page.html")
+    return FileResponse(FRONTEND_DIR / "index.html")
 
 @app.post("/register")
 async def register(user: RegisterRequest):
-    try:
-        existing_user = supabase.table("Users").select("*").eq("email", user.email).execute()
-        if existing_user.data:
-            return JSONResponse(content={"message": "El usuario ya existe"}, status_code=400)
+    # Verificar si el usuario ya existe
+    query_check = 'SELECT * FROM "Users" WHERE email = :email'
+    existing_user = execute_query(query_check, {"email": user.email}).first()
+    if existing_user:
+        return JSONResponse(content={"message": "El usuario ya existe"}, status_code=400)
 
-        new_user = {
-            "name": user.name,
-            "email": user.email,
-            "password": user.password
-        }
-        response = supabase.table("Users").insert(new_user).execute()
-        if response.status_code != 201:
-            return JSONResponse(content={"message": "Error al registrar el usuario"}, status_code=500)
-        
-        return JSONResponse(content={"message": "Usuario registrado con éxito"}, status_code=201)
-    except Exception as e:
-        print(f"Error al registrar el usuario: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error al registrar el usuario: {str(e)}")
+    # Insertar nuevo usuario
+    query_insert = 'INSERT INTO "Users" (name, email, password) VALUES (:name, :email, :password)'
+    execute_query(query_insert, user.dict())
+    
+    return JSONResponse(content={"message": "Usuario registrado con éxito"}, status_code=201)
 
 @app.post("/login")
 async def login(user: LoginRequest):
-    try:
-        result = supabase.table("Users").select("*").eq("email", user.email).eq("password", user.password).execute()
-        if not result.data:
-            return JSONResponse(content={"message": "Correo o contraseña incorrectos"}, status_code=400)
-        return JSONResponse(content={"message": "Inicio de sesión exitoso", "user_id": result.data[0]['id']}, status_code=200)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    query = 'SELECT * FROM "Users" WHERE email = :email AND password = :password'
+    result = execute_query(query, user.dict()).first()
+    
+    if not result:
+        return JSONResponse(content={"message": "Correo o contraseña incorrectos"}, status_code=400)
+    
+    user_data = result._asdict()
+    return JSONResponse(content={"message": "Inicio de sesión exitoso", "user_id": user_data['id']}, status_code=200)
 
 @app.get("/reserved-dates/{property_id}")
 async def get_reserved_dates(property_id: int):
-    try:
-        response = supabase.table("Bookings").select("in_time, out_time").eq("property_id", property_id).execute()
-        reserved_dates = []
-        for booking in response.data:
-            in_time = datetime.fromisoformat(booking["in_time"])
-            out_time = datetime.fromisoformat(booking["out_time"])
-            
-            current_date = in_time
-            while current_date <= out_time:
-                reserved_dates.append(current_date.strftime("%Y-%m-%d"))
-                current_date += timedelta(days=1)
+    query = 'SELECT in_time, out_time FROM "Bookings" WHERE property_id = :property_id'
+    bookings = execute_query(query, {"property_id": property_id}).fetchall()
+    
+    reserved_dates = []
+    for booking in bookings:
+        in_time = booking[0] # Acceso por índice
+        out_time = booking[1]
         
-        return JSONResponse(content={"reserved_dates": reserved_dates}, status_code=200)
-    except Exception as e:
-        print(f"Error al obtener las fechas reservadas: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        current_date = in_time
+        while current_date <= out_time:
+            reserved_dates.append(current_date.strftime("%Y-%m-%d"))
+            current_date += timedelta(days=1)
+    
+    return JSONResponse(content={"reserved_dates": reserved_dates}, status_code=200)
 
 @app.post("/reserve")
 async def reserve(reservation: ReservationRequest):
     try:
-        user = supabase.table("Users").select("*").eq("id", reservation.user_id).execute()
-        if not user.data:
-            return JSONResponse(content={"message": "Usuario no encontrado"}, status_code=404)
+        in_time = datetime.strptime(reservation.in_time, "%Y-%m-%d")
+        out_time = datetime.strptime(reservation.out_time, "%Y-%m-%d")
+    except ValueError:
+        return JSONResponse(content={"message": "Formato de fecha inválido. Use YYYY-MM-DD"}, status_code=400)
 
-        try:
-            in_time = datetime.strptime(reservation.in_time, "%Y-%m-%d")
-            out_time = datetime.strptime(reservation.out_time, "%Y-%m-%d")
-        except ValueError as e:
-            return JSONResponse(content={"message": "Formato de fecha inválido. Use YYYY-MM-DD"}, status_code=400)
+    if in_time.date() < datetime.now().date():
+        return JSONResponse(content={"message": "No puedes reservar fechas pasadas"}, status_code=400)
 
-        if in_time < datetime.now() or out_time < datetime.now():
-            return JSONResponse(content={"message": "No puedes reservar fechas pasadas"}, status_code=400)
+    # Comprobar si hay reservas que se solapan
+    # Una reserva se solapa si (start1 <= end2) and (end1 >= start2)
+    query_check = """
+        SELECT id FROM "Bookings"
+        WHERE property_id = :property_id AND
+        in_time <= :out_time AND out_time >= :in_time
+    """
+    existing_reservation = execute_query(query_check, {"property_id": reservation.property_id, "in_time": in_time, "out_time": out_time}).first()
+    if existing_reservation:
+        return JSONResponse(content={"message": "La propiedad ya está reservada en esas fechas"}, status_code=400)
 
-        existing_reservation = supabase.table("Bookings").select("*").eq("property_id", reservation.property_id).gte("in_time", in_time.isoformat()).lte("out_time", out_time.isoformat()).execute()
-        if existing_reservation.data:
-            return JSONResponse(content={"message": "La propiedad ya está reservada en esas fechas"}, status_code=400)
+    # Crear la nueva reserva
+    query_insert = """
+        INSERT INTO "Bookings" (property_id, user_id, in_time, out_time, status)
+        VALUES (:property_id, :user_id, :in_time, :out_time, 'activo')
+    """
+    execute_query(query_insert, {
+        "property_id": reservation.property_id,
+        "user_id": reservation.user_id,
+        "in_time": in_time,
+        "out_time": out_time
+    })
 
-        new_reservation = {
-            "property_id": reservation.property_id,
-            "user_id": reservation.user_id,
-            "in_time": in_time.isoformat(),
-            "out_time": out_time.isoformat(),
-            "status": "activo"  
-        }
-
-        response = supabase.table("Bookings").insert(new_reservation).execute()
-        if not response.data:
-            return JSONResponse(content={"message": "Error al realizar la reserva", "details": str(response)}, status_code=500)
-
-        return JSONResponse(content={"message": "Reserva realizada con éxito"}, status_code=201)
-    except Exception as e:
-        print(f"Error al realizar la reserva: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error al realizar la reserva: {str(e)}")
-    
+    return JSONResponse(content={"message": "Reserva realizada con éxito"}, status_code=201)
 
 @app.get("/active-reservations/{user_id}")
 async def get_active_reservations(user_id: int):
-    try:
-        now = datetime.now().isoformat()
-        reservations = supabase.table("Bookings").select("id, property_id, user_id, in_time, out_time, status").eq("user_id", user_id).gte("out_time", now).execute()
-
-        if not reservations.data:
-            return JSONResponse(content={"reservations": []}, status_code=200)
-
-        active_reservations = []
-        for reservation in reservations.data:
-            property_details = (
-                supabase.table("Property")
-                .select("id, name")
-                .eq("id", reservation["property_id"])
-                .execute()
-            )
-
-            if property_details.data:
-                property = property_details.data[0]
-                active_reservations.append({
-                    "id": reservation["id"],
-                    "property_id": reservation["property_id"],
-                    "property_name": property["name"],
-                    "in_time": reservation["in_time"],
-                    "out_time": reservation["out_time"],
-                    "status": reservation["status"]
-                })
-
-        return JSONResponse(content={"reservations": active_reservations}, status_code=200)
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+    now = datetime.now()
+    # Usamos JOIN para obtener el nombre de la propiedad en una sola consulta
+    query = """
+        SELECT b.id, b.property_id, p.name AS property_name, b.in_time, b.out_time, b.status
+        FROM "Bookings" b
+        JOIN "Property" p ON b.property_id = p.id
+        WHERE b.user_id = :user_id AND b.out_time >= :now
+    """
+    reservations = execute_query(query, {"user_id": user_id, "now": now}).fetchall()
     
+    active_reservations = [row._asdict() for row in reservations]
+    
+    return JSONResponse(content={"reservations": active_reservations}, status_code=200)
 
 async def update_expired_reservations():
-    try:
-        now = datetime.now().isoformat()
-        expired_reservations = supabase.table("Bookings").select("*").eq("status", "activo").lt("out_time", now).execute()
-
-        for reservation in expired_reservations.data:
-            supabase.table("Bookings").update({"status": "terminado"}).eq("id", reservation["id"]).execute()
-
-    except Exception as e:
-        print(f"Error al actualizar las reservas caducadas: {str(e)}")
+    now = datetime.now()
+    query = 'UPDATE "Bookings" SET status = \'terminado\' WHERE status = \'activo\' AND out_time < :now'
+    execute_query(query, {"now": now})
+    print("Reservas caducadas actualizadas.")
 
 @app.get("/update-reservations")
 async def trigger_update_reservations(background_tasks: BackgroundTasks):
@@ -192,56 +188,31 @@ async def trigger_update_reservations(background_tasks: BackgroundTasks):
 
 @app.get("/past-reservations/{user_id}")
 async def get_past_reservations(user_id: int):
-    try:
-        now = datetime.now().isoformat()
-        reservations = supabase.table("Bookings").select("*").eq("user_id", user_id).lt("out_time", now).execute()
+    now = datetime.now()
+    query = """
+        SELECT b.id, b.property_id, p.name AS property_name, b.in_time, b.out_time, b.status
+        FROM "Bookings" b
+        JOIN "Property" p ON b.property_id = p.id
+        WHERE b.user_id = :user_id AND b.out_time < :now
+    """
+    reservations = execute_query(query, {"user_id": user_id, "now": now}).fetchall()
+    
+    past_reservations = [row._asdict() for row in reservations]
 
-        if not reservations.data:
-            return JSONResponse(content={"reservations": []}, status_code=200)
-
-        past_reservations = []
-        for reservation in reservations.data:
-            property_details = (
-                supabase.table("Property")
-                .select("id, name")
-                .eq("id", reservation["property_id"])
-                .execute()
-            )
-
-            if property_details.data:
-                property = property_details.data[0]
-                past_reservations.append({
-                    "id": reservation["id"],
-                    "property_id": reservation["property_id"],
-                    "property_name": property["name"],
-                    "in_time": reservation["in_time"],
-                    "out_time": reservation["out_time"],
-                    "status": reservation["status"]
-                })
-
-        return JSONResponse(content={"reservations": past_reservations}, status_code=200)
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+    return JSONResponse(content={"reservations": past_reservations}, status_code=200)
 
 @app.post("/feedback")
 async def submit_feedback(feedback: FeedbackRequest):
-    try:
-        response = supabase.table("Feedback").insert({
-            "id_booking": feedback.id_booking,
-            "id_property": feedback.id_property,
-            "comments": feedback.comments,
-            "rating": feedback.rating
-        }).execute()
-
-        return JSONResponse(content={"message": "Feedback guardado"}, status_code=201)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # La consulta se actualiza para que coincida con la tabla
+    query = """
+        INSERT INTO "Feedback" (id_property, comment, rating)
+        VALUES (:id_property, :comment, :rating)
+    """
+    execute_query(query, feedback.dict())
+    return JSONResponse(content={"message": "Feedback guardado"}, status_code=201)
     
 @app.get("/feedback/{property_id}")
 async def get_feedback(property_id: int):
-    try:
-        response = supabase.table("Feedback").select("*").eq("id_property", property_id).execute()
-        feedback_list = response.data
-        return JSONResponse(content={"feedback": feedback_list}, status_code=200)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    query = 'SELECT * FROM "Feedback" WHERE id_property = :property_id'
+    feedback_list = [row._asdict() for row in execute_query(query, {"property_id": property_id}).fetchall()]
+    return JSONResponse(content={"feedback": feedback_list}, status_code=200)
